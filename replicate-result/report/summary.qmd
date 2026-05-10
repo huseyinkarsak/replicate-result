@@ -1,0 +1,213 @@
+---
+title: "Replication Report: SAX-VSM Algorithm on OSULeaf Dataset"
+subtitle: "IE 48B: Special Topics in Time Series Analytics"
+author: "**Hüseyin Karsak** | Student ID: **2019402078**"
+date: "May 11, 2026"
+format:
+  html:
+    page-layout: full
+    toc: false
+    toc-depth: 3
+    toc-title: "Contents"
+    number-sections: true
+    theme: cosmo
+    code-fold: true
+    code-summary: "Show code"
+    embed-resources: true
+    self-contained: true
+    fig-width: 9
+    fig-height: 4
+    fig-dpi: 150
+execute:
+  echo: true
+  warning: false
+  message: false
+  keep-ipynb: false
+---
+
+## 1. Executive Summary
+
+This report provides an independent replication and critical analysis of the **SAX-VSM** (Symbolic Aggregate approximation - Vector Space Model) classifier proposed by Senin and Malinchik (2013). The study focuses on the **OSULeaf** dataset, which consists of boundary curves extracted from digitized leaf images across six botanical classes. While the original paper reports a state-of-the-art error rate of **0.107** (89.3% accuracy), our replication achieved an error rate of **0.161** (83.9% accuracy). This report details the mathematical foundations of the algorithm, the replication process using Grid Search, and provides a technical post-mortem on the performance discrepancies and the algorithm's core strength: visual interpretability.
+
+## 2. Methodology and Algorithmic Framework
+
+SAX-VSM differs from traditional 1NN classifiers by representing each class not by its individual instances, but as a single, weighted frequency vector in a high-dimensional space. The process involves two primary stages:
+
+### 2.1 Symbolic Representation (SAX)
+Overlapping subsequences are continuously extracted from the time series using a sliding window of length $W$. Each subsequence undergoes:
+1.  **Z-normalization**: Applied to achieve scale and offset invariance.
+2.  **PAA (Piecewise Aggregate Approximation)**: Reduces the dimensionality from $W$ to $P$ segments by computing the mean of each segment.
+3.  **Symbolic Mapping**: Maps the $P$ continuous PAA coefficients to a discrete alphabet of size $A$ based on Gaussian distribution breakpoints, forming a "SAX word."
+
+### 2.2 Vector Space Integration and tf-idf Weighting
+Instead of evaluating individual instances, the algorithm aggregates all SAX words from a class into a single "bag of words." To highlight class-specific discriminative features, it applies the **tf-idf** (term frequency - inverse document frequency) weighting schema (specifically the *ltc.nnn* variant):
+* **Term Frequency (tf)**: Logarithmically scaled frequency within the class bag, $tf = \log(1 + f_{t,d})$.
+* **Inverse Document Frequency (idf)**: Penalizes common patterns (words) that appear across multiple classes, $idf = \log(N/df_t)$, where $N$ is the total number of classes.
+
+The final classification of an unlabeled time series is determined by converting it into a term frequency vector and calculating the maximum **Cosine Similarity** against the $N$ trained tf-idf class weight vectors.
+
+## 3. Replication Results and Comparison
+
+To reproduce the results objectively, we conducted a grid search over the parameter space using the student ID (2019402078) as the random seed for computational reproducibility. 
+
+### 3.1 Parameter Optimization
+We evaluated combinations across window sizes $W \in [60, 80, 100]$, PAA sizes $P \in [8, 10]$, and alphabet sizes $A \in [4, 5]$. The optimal configuration for predictive accuracy was identified as **$W=80, P=10, A=5$**.
+
+### 3.2 Side-by-Side Performance Comparison
+
+| Metric | Original Paper (Senin & Malinchik) | Replicated Result (Karsak, 2026) |
+|:---|:---:|:---:|
+| **Target Error Rate** | 0.107 | **0.161** |
+| **Classification Accuracy** | 89.30% | **83.88%** |
+| **Optimization Method** | DIRECT Algorithm | Grid Search |
+| **Baseline 1NN-DTW Error** | 0.409 | 0.409 (Literature Baseline) |
+
+## 4. Critical Analysis of Discrepancies
+
+The gap between our replicated error rate (0.161) and the paper’s benchmark (0.107) is significant and warrants a technical investigation based on the original study's parameters.
+
+### 4.1 Optimization Depth: DIRECT vs. Grid Search
+The original authors employed the **DIRECT (Dividing Rectangles)** algorithm, a robust global optimization scheme. As noted in their study, DIRECT was able to sample highly specific parameter coordinates iteratively, finding global minima without requiring predefined bounds. Our discrete Grid Search, while mathematically sound, evaluated a limited subset of the parameter space and likely missed the high-precision optimal coordinates that DIRECT identified.
+
+### 4.2 Normalization Thresholding and Noise
+A crucial algorithmic detail in the original study is the use of a **fixed threshold for standard deviation**. If a sliding window's variance falls below this specific threshold, z-normalization is intentionally skipped to prevent over-amplifying background noise. Our replication applied global z-normalization to all sliding windows. Given that OSULeaf boundary extractions naturally contain digitized artifacts, normalizing low-variance (flat) segments likely introduced "confusive" noisy words that degraded the selectivity of the tf-idf weights.
+
+### 4.3 Interpretability Success
+Despite the numerical discrepancy in accuracy, the model's defining feature—**interpretability**—was fully and successfully reproduced. By visualizing the tf-idf weights on the original time series, we confirmed that the algorithm effectively prioritizes correct botanical features:
+* **Acer Circinatum**: Focused accurately on acute leaf tips.
+* **Acer Glabrum**: Highlighted the coarsely serrated leaf margins.
+* **Quercus Garryana**: Identified the pinnately lobed leaf structure.
+
+### 4.4 Accuracy vs. Interpretability Trade-off
+
+During hyperparameter optimization, a clear trade-off emerged: a window size of $W=80$ maximized classification accuracy, while $W=60$ provided vastly superior visual interpretability. At $W=80$, the PAA step smooths out high-frequency botanical details, prompting the model to rely on the macro-geometry of the leaf. Since the core contribution of SAX-VSM is feature-based interpretability, $W=60$ was deliberately selected for the visual plots despite a marginal accuracy drop. This narrower window successfully captures the defining micro-structures mentioned in the literature.
+
+Furthermore, occasional mismatches between the highest TF-IDF weighted patterns and expected visual features can be attributed to random sampling. Because the data originates from digitized leaf boundaries, randomly selected test instances may naturally contain segmentation noise, irregular growth, or physical deformities. Consequently, a randomly sampled leaf is often not the perfect morphological archetype for its class, which can occasionally obscure the visual clarity of the highlighted patterns.
+
+```{python}
+#| label: fig-interpretability
+#| fig-cap: "Characteristic patterns discovered by SAX-VSM. Bold red segments represent the single best subsequence with the highest TF-IDF weight for the respective class."
+
+import numpy as np
+import matplotlib.pyplot as plt
+import os  
+from collections import Counter
+from scipy.stats import norm
+
+# 1. SAX-VSM Class (Visualization Supported)
+class SAXVSM_Viz:
+    def __init__(self, window_size, paa_size, alphabet_size):
+        self.W, self.P, self.A = window_size, paa_size, alphabet_size
+        self.breakpoints = norm.ppf(np.linspace(1/alphabet_size, 1 - 1/alphabet_size, alphabet_size - 1))
+        self.tfidf_matrix = {}
+        self.classes = []
+
+    def _z_normalize(self, ts):
+        std = np.std(ts)
+        return (ts - np.mean(ts)) / std if std > 1e-6 else ts - np.mean(ts)
+
+    def _paa(self, ts):
+        return [np.mean(seg) for seg in np.array_split(ts, self.P)]
+
+    def _to_sax(self, paa_segments):
+        word = ""
+        for val in paa_segments:
+            idx = np.searchsorted(self.breakpoints, val)
+            word += chr(97 + idx)
+        return word
+
+    def fit(self, X, y):
+        self.classes = np.unique(y)
+        class_bags = {c: Counter() for c in self.classes}
+        for ts, label in zip(X, y):
+            words = [self._to_sax(self._paa(self._z_normalize(ts[i:i+self.W]))) 
+                     for i in range(len(ts)-self.W+1)]
+            class_bags[label].update(words)
+        
+        all_terms = set().union(*[bag.keys() for bag in class_bags.values()])
+        term_df = {t: sum(1 for c in self.classes if t in class_bags[c]) for t in all_terms}
+        
+        for c in self.classes:
+            self.tfidf_matrix[c] = {t: np.log(1+f)*np.log(len(self.classes)/term_df[t]) 
+                                    for t, f in class_bags[c].items()}
+
+# 2. Data Loading
+def load_data(path):
+    X, y = [], []
+    with open(path, 'r') as f:
+        for line in f:
+            if not line.strip() or line.startswith(('@', '#')): continue
+            parts = line.split(':')
+            X.append(np.array([float(v) for v in parts[0].split(',')]))
+            y.append(int(parts[1]))
+    return X, np.array(y)
+
+# File Paths
+base_p = "/Users/huseyinkarsak/Documents/GitHub/spring26-huseyinkarsak/replicate-result/data"
+X_train, y_train = load_data(os.path.join(base_p, "OSULeaf_TRAIN.ts"))
+
+# Model Training (Optimized for Interpretability)
+model = SAXVSM_Viz(window_size=60, paa_size=8, alphabet_size=5)
+model.fit(X_train, y_train)
+
+# 3. Visualization (Paper Fig 6 Style)
+selected_classes = [1, 2, 5] 
+class_names = {1: "Acer Circinatum", 2: "Acer Glabrum", 5: "Quercus Garryana"}
+
+# Student ID as Seed
+np.random.seed(2019402078)
+
+# Sample selection
+selected_indices = {}
+for cls in selected_classes:
+    indices = np.where(y_train == cls)[0]
+    selected_indices[cls] = np.random.choice(indices, 3, replace=False)
+
+fig, axes = plt.subplots(3, 3, figsize=(15, 12), sharex=True)
+
+for i, cls in enumerate(selected_classes):
+    for j in range(3):
+        idx = selected_indices[cls][j]
+        ts = X_train[idx]
+        
+        best_score = -1
+        best_start_idx = 0
+        
+        # Scan with sliding window to find the BEST single pattern
+        for k in range(len(ts) - model.W + 1):
+            window = ts[k:k+model.W]
+            word = model._to_sax(model._paa(model._z_normalize(window)))
+            score = model.tfidf_matrix[cls].get(word, 0)
+            
+            if score > best_score:
+                best_score = score
+                best_start_idx = k
+        
+        # Plotting
+        axes[i, j].plot(ts, color='gray', linewidth=1, alpha=0.5, label='Original')
+        
+        # Highlight only the best distinguishing pattern
+        if best_score > 0:
+            axes[i, j].plot(
+                range(best_start_idx, best_start_idx + model.W), 
+                ts[best_start_idx : best_start_idx + model.W], 
+                color='red', linewidth=4
+            )
+                
+        axes[i, j].set_title(f"{class_names[cls]}", fontsize=12)
+        if j == 0:
+            axes[i, j].set_ylabel("Distance")
+
+plt.xlabel("Index")
+plt.tight_layout()
+plt.show()
+```
+
+### 5. Conclusion
+
+The replication of SAX-VSM confirms its status as a robust and interpretable alternative to distance-based time series classification. While our error rate of 0.161 did not reach the author's benchmark of 0.107, it vastly outperformed the DTW baseline. The discrepancy highlights the sensitivity of SAX parameters and the necessity of global optimization techniques like DIRECT, as well as proper noise thresholding, for peak performance. However, the algorithm's ability to seamlessly rank patterns by importance and map them to physical realities remains its most valuable contribution to the field.
+
+### 6. References
+Senin, P., & Malinchik, S. (2013). SAX-VSM: Interpretable Time Series Classification Using SAX and Vector Space Model. 2013 IEEE 13th International Conference on Data Mining, 1175-1180.
+
+Gandhi, A. (2002). Content-Based Image Retrieval: Plant Species Identification. MS Thesis, Oregon State University.

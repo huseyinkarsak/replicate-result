@@ -1,0 +1,7 @@
+### **requirements.txt**
+
+```text
+numpy
+matplotlib
+scipy
+```
